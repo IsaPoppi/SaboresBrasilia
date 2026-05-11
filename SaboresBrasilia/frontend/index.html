@@ -360,6 +360,13 @@
   const API_URL = "http://localhost:8000/chat"; // URL do backend Python
 
   // =============================================
+  // UTILITÁRIOS
+  // =============================================
+  function escHtml(str) {
+    return String(str ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  // =============================================
   // MAPA
   // =============================================
   const map = L.map("map").setView([-15.7801, -47.9292], 12);
@@ -400,9 +407,9 @@
       const marker = L.marker([r.lat, r.lng], { icon: createMarkerIcon(i) }).addTo(map);
       marker.bindPopup(`
         <div style="min-width:180px">
-          <div class="popup-name">${i + 1}. ${r.name}</div>
-          <div class="popup-meta">${r.cuisine} · ${r.priceRange} · ${r.neighborhood}</div>
-          <div class="popup-desc">${r.description}</div>
+          <div class="popup-name">${i + 1}. ${escHtml(r.name)}</div>
+          <div class="popup-meta">${escHtml(r.cuisine)} · ${escHtml(r.priceRange)} · ${escHtml(r.neighborhood)}</div>
+          <div class="popup-desc">${escHtml(r.description)}</div>
         </div>`);
       markers.push(marker);
       bounds.push([r.lat, r.lng]);
@@ -433,12 +440,12 @@
       restaurants.forEach((r, i) => {
         cards.innerHTML += `
           <div class="r-card" onclick="focusRestaurant(${i})">
-            <div class="r-card-name">${i + 1}. ${r.name}</div>
-            <div class="r-card-meta">${r.neighborhood}</div>
-            <div class="r-card-desc">${r.description}</div>
+            <div class="r-card-name">${i + 1}. ${escHtml(r.name)}</div>
+            <div class="r-card-meta">${escHtml(r.neighborhood)}</div>
+            <div class="r-card-desc">${escHtml(r.description)}</div>
             <div class="tags">
-              <span class="tag">${r.cuisine}</span>
-              <span class="tag">${r.priceRange}</span>
+              <span class="tag">${escHtml(r.cuisine)}</span>
+              <span class="tag">${escHtml(r.priceRange)}</span>
             </div>
           </div>`;
       });
@@ -482,21 +489,35 @@
     const sendBtn = document.getElementById("sendBtn");
     const userText = text || input.value.trim();
     if (!userText) return;
+    if (userText.length > 400) {
+      addMessage("error", "Mensagem muito longa. Seja mais breve!");
+      return;
+    }
 
     input.value = "";
     sendBtn.disabled = true;
     addMessage("user", userText);
     conversationHistory.push({ role: "user", content: userText });
+    // Mantém apenas as últimas 20 mensagens para não crescer indefinidamente
+    if (conversationHistory.length > 20) conversationHistory = conversationHistory.slice(-20);
     addTypingIndicator();
 
     try {
       const response = await fetch(API_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: conversationHistory }),
+        body: JSON.stringify({ messages: conversationHistory.slice(-10) }),
       });
 
-      if (!response.ok) throw new Error(`Erro ${response.status}`);
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        const detail = err.detail || `Erro ${response.status}`;
+        removeTypingIndicator();
+        addMessage("error", detail);
+        sendBtn.disabled = false;
+        input.focus();
+        return;
+      }
 
       const data = await response.json();
       removeTypingIndicator();

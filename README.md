@@ -51,6 +51,14 @@ Acesse https://console.groq.com/keys e crie uma chave.
 
 ### 2. Criar o arquivo `.env` na pasta `backend/`
 
+Copie o arquivo de exemplo e preencha com sua chave:
+
+```bash
+cp backend/.env.example backend/.env
+```
+
+Ou crie manualmente o arquivo `backend/.env`:
+
 ```env
 GROQ_API_KEY=gsk_SUA_CHAVE_AQUI
 ```
@@ -65,7 +73,7 @@ pip install -r requirements.txt
 ### 4. Rodar o servidor
 
 ```bash
-uvicorn main:app --reload --port 8000
+python -m uvicorn main:app --reload
 ```
 
 A API estará disponível em: `http://localhost:8000`

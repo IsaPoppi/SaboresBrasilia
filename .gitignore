@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Variáveis de ambiente — nunca commitar
+.env
+
+# Editores
+.vscode/
+.idea/
+*.DS_Store
+Thumbs.db
