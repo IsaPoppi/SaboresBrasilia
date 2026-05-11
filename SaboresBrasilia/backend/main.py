@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
+from typing import Annotated
 from groq import Groq
 from dotenv import load_dotenv
 import json, os, re, httpx, random, logging
@@ -63,14 +64,30 @@ AMENITY_MAP = {
     "confeitaria":   "cafe",
 }
 
+# ── Schema de saída do LLM ───────────────────────────────────────────────────
+class ModelOutput(BaseModel):
+    cuisine: Annotated[
+        str | None,
+        "tipo de cozinha ou estabelecimento em português ou inglês "
+        "(ex: japonês, pizza, churrasco, italiano, vegetariano, burger, chinês, "
+        "árabe, seafood, mexicano, café, cafeteria, padaria, indiano, coreano, "
+        "lanche, frango) — null se não especificado"
+    ] = None
+    neighborhood: Annotated[
+        str | None,
+        "bairro mencionado em lowercase "
+        "(ex: asa sul, asa norte, lago sul, lago norte, sudoeste, noroeste, "
+        "águas claras, taguatinga) — null se não mencionado"
+    ] = None
+    friendly_message: Annotated[
+        str,
+        "mensagem de 1 frase dizendo que está buscando os lugares"
+    ] = "Buscando restaurantes para você..."
+
 # ── Prompt para extrair intenção ─────────────────────────────────────────────
-INTENT_PROMPT = """Você extrai intenções de busca de restaurantes e cafés em Brasília.
-Responda SOMENTE com JSON válido, sem markdown:
-{
-  "cuisine": "tipo de cozinha ou estabelecimento em português ou inglês (ex: japonês, pizza, churrasco, italiano, vegetariano, burger, chinês, árabe, seafood, mexicano, café, cafeteria, padaria, indiano, coreano, lanche, frango) ou null se não especificado",
-  "neighborhood": "bairro mencionado em lowercase (ex: asa sul, asa norte, lago sul, lago norte, sudoeste, noroeste, águas claras, taguatinga) ou null",
-  "friendly_message": "mensagem de 1 frase dizendo que está buscando os lugares"
-}"""
+INTENT_PROMPT = f"""Você extrai intenções de busca de restaurantes e cafés em Brasília.
+Responda SOMENTE com JSON válido seguindo este schema, sem markdown:
+{json.dumps(ModelOutput.model_json_schema(), ensure_ascii=False, indent=2)}"""
 
 # ── Bounding boxes dos bairros ───────────────────────────────────────────────
 NEIGHBORHOODS = {
@@ -195,17 +212,17 @@ class ChatRequest(BaseModel):
     messages: list[Message]
 
 class Restaurant(BaseModel):
-    name: str
-    description: str
-    cuisine: str
-    priceRange: str
-    neighborhood: str
-    lat: float
-    lng: float
-    address: str | None = None
-    phone: str | None = None
-    website: str | None = None
-    opening_hours: str | None = None
+    name:          Annotated[str,        "nome do estabelecimento"]
+    description:   Annotated[str,        "descrição gerada a partir das tags OSM"]
+    cuisine:       Annotated[str,        "tipo de cozinha extraído da tag cuisine do OSM"]
+    priceRange:    Annotated[str,        "faixa de preço ($, $$, $$$, $$$$)"]
+    neighborhood:  Annotated[str,        "bairro extraído das tags de endereço do OSM"]
+    lat:           Annotated[float,      "latitude do estabelecimento"]
+    lng:           Annotated[float,      "longitude do estabelecimento"]
+    address:       Annotated[str | None, "endereço formatado (rua + número)"] = None
+    phone:         Annotated[str | None, "telefone de contato"]               = None
+    website:       Annotated[str | None, "site do estabelecimento"]           = None
+    opening_hours: Annotated[str | None, "horário de funcionamento (padrão OSM)"] = None
 
 class ChatResponse(BaseModel):
     message: str
@@ -234,6 +251,7 @@ async def chat(request: ChatRequest):
             ],
             max_tokens=200,
             temperature=0.2,
+            response_format={"type": "json_object"},
         )
         raw = intent_resp.choices[0].message.content
     except Exception as e:
@@ -243,18 +261,19 @@ async def chat(request: ChatRequest):
     logger.info(f"Intent raw: {raw}")
 
     try:
-        intent = json.loads(raw)
-    except json.JSONDecodeError:
+        intent = ModelOutput.model_validate_json(raw)
+    except ValidationError:
+        # Tenta extrair o bloco JSON caso o modelo tenha adicionado markdown
         match = re.search(r"\{[\s\S]*\}", raw)
         try:
-            intent = json.loads(match.group()) if match else {}
-        except (json.JSONDecodeError, AttributeError):
+            intent = ModelOutput.model_validate_json(match.group()) if match else ModelOutput()
+        except (ValidationError, AttributeError):
             logger.warning(f"Não foi possível parsear intent: {raw!r}")
-            intent = {}
+            intent = ModelOutput()
 
-    cuisine_input = (intent.get("cuisine") or "").lower().strip()
-    hood          = (intent.get("neighborhood") or "").lower().strip()
-    friendly      = intent.get("friendly_message", "Buscando restaurantes para você...")
+    cuisine_input = (intent.cuisine or "").lower().strip()
+    hood          = (intent.neighborhood or "").lower().strip()
+    friendly      = intent.friendly_message
 
     logger.info(f"Intent extraído: cuisine={cuisine_input!r} neighborhood={hood!r}")
 
