@@ -1,10 +1,10 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, ValidationError
-from typing import Annotated
+from pydantic import BaseModel, ValidationError, field_validator
+from typing import Annotated, Literal
 from groq import Groq
 from dotenv import load_dotenv
-import json, os, re, httpx, random, logging
+import json, os, httpx, random, logging
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -18,71 +18,47 @@ if not _groq_api_key:
     raise RuntimeError("GROQ_API_KEY não encontrada. Crie um arquivo .env com GROQ_API_KEY=sua_chave.")
 groq_client = Groq(api_key=_groq_api_key, timeout=15.0)
 
-# ── Mapeamento de intenções para tags OSM ────────────────────────────────────
-# OSM usa tags variadas; esse dicionário expande a busca com regex
-CUISINE_MAP = {
-    "japonês":       "japanese|sushi|temaki",
-    "japanese":      "japanese|sushi|temaki",
-    "sushi":         "japanese|sushi|temaki",
-    "pizza":         "pizza|italian",
-    "italiano":      "italian|pizza",
-    "churrasco":     "barbecue|churrascaria|brazilian",
-    "barbecue":      "barbecue|churrascaria|brazilian",
-    "brasileiro":    "brazilian|regional|barbecue",
-    "vegetariano":   "vegetarian|vegan",
-    "vegano":        "vegan|vegetarian",
-    "hamburguer":    "burger|american",
-    "burger":        "burger|american",
-    "chines":        "chinese|asian",
-    "chinês":        "chinese|asian",
-    "chinese":       "chinese|asian",
-    "árabe":         "arab|lebanese|middle_eastern",
-    "arab":          "arab|lebanese|middle_eastern",
-    "frutos do mar": "seafood|fish",
-    "seafood":       "seafood|fish",
-    "mexicano":      "mexican",
-    "thai":          "thai|asian",
-    "indiano":       "indian",
-    "indian":        "indian",
-    "coreano":       "korean",
-    "korean":        "korean",
-    "peruano":       "peruvian",
-    "frango":        "chicken|portuguese",
-    "lanche":        "sandwich|burger|fastfood",
-    "sanduíche":     "sandwich|burger",
-    "fast food":     "burger|fastfood|sandwich",
-}
-
-# Alguns tipos de estabelecimento usam amenity=cafe no OSM, não amenity=restaurant
-AMENITY_MAP = {
-    "café":          "cafe",
-    "cafe":          "cafe",
-    "cafeteria":     "cafe",
-    "café da manhã": "cafe",
-    "coffee":        "cafe",
-    "padaria":       "cafe",
-    "confeitaria":   "cafe",
-}
-
 # ── Schema de saída do LLM ───────────────────────────────────────────────────
 class ModelOutput(BaseModel):
     cuisine: Annotated[
         str | None,
-        "tipo de cozinha ou estabelecimento em português ou inglês "
+        "tipo de cozinha ou estabelecimento mencionado pelo usuário em linguagem natural "
         "(ex: japonês, pizza, churrasco, italiano, vegetariano, burger, chinês, "
         "árabe, seafood, mexicano, café, cafeteria, padaria, indiano, coreano, "
         "lanche, frango) — null se não especificado"
     ] = None
-    neighborhood: Annotated[
+    cuisine_osm_regex: Annotated[
         str | None,
+        "regex para filtrar a tag 'cuisine' do OpenStreetMap, em inglês, com termos separados por '|'. "
+        "Exemplos: 'japanese|sushi|temaki', 'pizza|italian', 'barbecue|churrascaria|brazilian', "
+        "'burger|american', 'chinese|asian', 'arab|lebanese|middle_eastern', 'seafood|fish', "
+        "'vegetarian|vegan', 'indian', 'korean', 'mexican', 'sandwich|burger|fastfood'. "
+        "Deve ser null quando amenity='cafe' (cafés raramente usam a tag cuisine no OSM) "
+        "ou quando nenhuma culinária foi especificada"
+    ] = None
+    amenity: Annotated[
+        Literal["restaurant", "cafe"],
+        "tipo de estabelecimento no OSM: use 'cafe' para cafés, cafeterias, padarias e confeitarias; "
+        "use 'restaurant' para todos os demais"
+    ] = "restaurant"
+    neighborhood: Annotated[
+        Literal[
+            "asa sul", "asa norte", "lago sul", "lago norte",
+            "sudoeste", "noroeste", "águas claras", "taguatinga", "guará"
+        ] | None,
         "bairro mencionado em lowercase "
         "(ex: asa sul, asa norte, lago sul, lago norte, sudoeste, noroeste, "
-        "águas claras, taguatinga) — null se não mencionado"
+        "águas claras, taguatinga, guará) — null se não mencionado"
     ] = None
     friendly_message: Annotated[
         str,
         "mensagem de 1 frase dizendo que está buscando os lugares"
     ] = "Buscando restaurantes para você..."
+
+    @field_validator("neighborhood", mode="before")
+    @classmethod
+    def normalize_neighborhood(cls, v: object) -> object:
+        return v.lower().strip() if isinstance(v, str) else v
 
 # ── Prompt para extrair intenção ─────────────────────────────────────────────
 INTENT_PROMPT = f"""Você extrai intenções de busca de restaurantes e cafés em Brasília.
@@ -249,7 +225,7 @@ async def chat(request: ChatRequest):
                 {"role": "system", "content": INTENT_PROMPT},
                 {"role": "user", "content": last_user_msg},
             ],
-            max_tokens=200,
+            max_tokens=300,
             temperature=0.2,
             response_format={"type": "json_object"},
         )
@@ -262,14 +238,9 @@ async def chat(request: ChatRequest):
 
     try:
         intent = ModelOutput.model_validate_json(raw)
-    except ValidationError:
-        # Tenta extrair o bloco JSON caso o modelo tenha adicionado markdown
-        match = re.search(r"\{[\s\S]*\}", raw)
-        try:
-            intent = ModelOutput.model_validate_json(match.group()) if match else ModelOutput()
-        except (ValidationError, AttributeError):
-            logger.warning(f"Não foi possível parsear intent: {raw!r}")
-            intent = ModelOutput()
+    except ValidationError as e:
+        logger.error(f"Validação do ModelOutput falhou: {e}")
+        raise HTTPException(status_code=503, detail="Serviço de IA retornou resposta inesperada. Tente novamente.")
 
     cuisine_input = (intent.cuisine or "").lower().strip()
     hood          = (intent.neighborhood or "").lower().strip()
@@ -277,12 +248,9 @@ async def chat(request: ChatRequest):
 
     logger.info(f"Intent extraído: cuisine={cuisine_input!r} neighborhood={hood!r}")
 
-    # 2. Determina amenity (cafe vs restaurant) e traduz culinária para regex OSM
-    amenity = AMENITY_MAP.get(cuisine_input, "restaurant")
-    cuisine_regex = CUISINE_MAP.get(cuisine_input) or (cuisine_input if cuisine_input else None)
-    # Para amenity=cafe não filtramos por cuisine tag (cafés raramente usam essa tag no OSM)
-    if amenity == "cafe":
-        cuisine_regex = None
+    # 2. Usa amenity e cuisine_osm_regex gerados diretamente pelo LLM
+    amenity       = intent.amenity
+    cuisine_regex = intent.cuisine_osm_regex
     logger.info(f"amenity={amenity!r} cuisine_regex={cuisine_regex!r}")
 
     # 3. Define bounding box
