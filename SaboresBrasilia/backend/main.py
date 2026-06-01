@@ -230,16 +230,14 @@ async def chat(request: ChatRequest):
             messages=history,
             max_tokens=200,
             temperature=0.2,
-            response_format={"type": "json_object"},
+            response_format=ModelOutput,
         )
-        raw = intent_resp.choices[0].message.content
+        intent = intent_resp.choices[0].message.parsed
     except Exception as e:
         logger.error(f"Groq erro: {e}")
         raise HTTPException(status_code=503, detail="Serviço de IA temporariamente indisponível. Tente novamente.")
 
-    logger.info(f"Intent raw: {raw}")
-
-    intent = ModelOutput.model_validate_json(raw)
+    logger.info(f"Intent parsed: {intent}")
 
     cuisine_input  = (intent.cuisine or "").lower().strip()
     hood           = (intent.neighborhood or "").lower().strip()
