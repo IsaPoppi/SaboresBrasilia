@@ -5,6 +5,10 @@ from typing import Annotated, Literal
 from groq import Groq
 from dotenv import load_dotenv
 import json, os, httpx, random, logging
+import instructor
+
+
+
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -13,10 +17,18 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="Chatbot Restaurantes Brasília")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
+
+@app.get("/")
+async def root():
+    return {"message": "API funcionando!"}
+
 _groq_api_key = os.getenv("GROQ_API_KEY")
 if not _groq_api_key:
     raise RuntimeError("GROQ_API_KEY não encontrada. Crie um arquivo .env com GROQ_API_KEY=sua_chave.")
 groq_client = Groq(api_key=_groq_api_key, timeout=15.0)
+groq_client = instructor.from_groq(
+   client=groq_client
+)
 
 #MUDANÇA 3 — Dicionários manuais removidos; o LLM agora gera diretamente
 # cuisine_osm_regex e amenity como campos do ModelOutput.
@@ -225,14 +237,13 @@ async def chat(request: ChatRequest):
 
     # 1. LLM extrai intenção
     try:
-        intent_resp = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+        intent = groq_client.chat.completions.create(
+            model='llama-3.3-70b-versatile',
             messages=history,
             max_tokens=200,
             temperature=0.2,
-            response_format=ModelOutput,
+            response_model=ModelOutput,
         )
-        intent = intent_resp.choices[0].message.parsed
     except Exception as e:
         logger.error(f"Groq erro: {e}")
         raise HTTPException(status_code=503, detail="Serviço de IA temporariamente indisponível. Tente novamente.")
