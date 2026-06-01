@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, ValidationError, field_validator
+from pydantic import BaseModel
 from typing import Annotated, Literal
 from groq import Groq
 from dotenv import load_dotenv
@@ -17,6 +17,9 @@ _groq_api_key = os.getenv("GROQ_API_KEY")
 if not _groq_api_key:
     raise RuntimeError("GROQ_API_KEY não encontrada. Crie um arquivo .env com GROQ_API_KEY=sua_chave.")
 groq_client = Groq(api_key=_groq_api_key, timeout=15.0)
+
+#MUDANÇA 3 — Dicionários manuais removidos; o LLM agora gera diretamente
+# cuisine_osm_regex e amenity como campos do ModelOutput.
 
 # ── Schema de saída do LLM ───────────────────────────────────────────────────
 class ModelOutput(BaseModel):
@@ -55,16 +58,13 @@ class ModelOutput(BaseModel):
         "mensagem de 1 frase dizendo que está buscando os lugares"
     ] = "Buscando restaurantes para você..."
 
-    @field_validator("neighborhood", mode="before")
-    @classmethod
-    def normalize_neighborhood(cls, v: object) -> object:
-        return v.lower().strip() if isinstance(v, str) else v
-
 # ── Prompt para extrair intenção ─────────────────────────────────────────────
 INTENT_PROMPT = f"""Você extrai intenções de busca de restaurantes e cafés em Brasília.
 Responda SOMENTE com JSON válido seguindo este schema, sem markdown:
 {json.dumps(ModelOutput.model_json_schema(), ensure_ascii=False, indent=2)}"""
 
+
+#MUDANÇA 1 
 # ── Bounding boxes dos bairros ───────────────────────────────────────────────
 NEIGHBORHOODS = {
     "asa sul":      (-15.830, -47.930, -15.790, -47.880),
@@ -217,15 +217,18 @@ async def chat(request: ChatRequest):
     if len(last_user_msg) > 400:
         raise HTTPException(status_code=400, detail="Mensagem muito longa. Use até 400 caracteres.")
 
+    history = [
+        {"role": "system", "content": INTENT_PROMPT},
+    ]
+    for m in request.messages:
+        history.append({"role": m.role, "content": m.content})
+
     # 1. LLM extrai intenção
     try:
         intent_resp = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
-            messages=[
-                {"role": "system", "content": INTENT_PROMPT},
-                {"role": "user", "content": last_user_msg},
-            ],
-            max_tokens=300,
+            messages=history,
+            max_tokens=200,
             temperature=0.2,
             response_format={"type": "json_object"},
         )
@@ -236,21 +239,17 @@ async def chat(request: ChatRequest):
 
     logger.info(f"Intent raw: {raw}")
 
-    try:
-        intent = ModelOutput.model_validate_json(raw)
-    except ValidationError as e:
-        logger.error(f"Validação do ModelOutput falhou: {e}")
-        raise HTTPException(status_code=503, detail="Serviço de IA retornou resposta inesperada. Tente novamente.")
+    intent = ModelOutput.model_validate_json(raw)
 
-    cuisine_input = (intent.cuisine or "").lower().strip()
-    hood          = (intent.neighborhood or "").lower().strip()
-    friendly      = intent.friendly_message
+    cuisine_input  = (intent.cuisine or "").lower().strip()
+    hood           = (intent.neighborhood or "").lower().strip()
+    friendly       = intent.friendly_message
 
     logger.info(f"Intent extraído: cuisine={cuisine_input!r} neighborhood={hood!r}")
 
     # 2. Usa amenity e cuisine_osm_regex gerados diretamente pelo LLM
-    amenity       = intent.amenity
-    cuisine_regex = intent.cuisine_osm_regex
+    amenity        = intent.amenity
+    cuisine_regex  = intent.cuisine_osm_regex
     logger.info(f"amenity={amenity!r} cuisine_regex={cuisine_regex!r}")
 
     # 3. Define bounding box
